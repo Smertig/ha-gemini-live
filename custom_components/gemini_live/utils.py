@@ -12,7 +12,7 @@ except ImportError:  # pragma: no cover - numpy is supplied by Home Assistant
 def set_detailed_logging(enabled: bool) -> None:
     """Set package logging verbosity for live model providers."""
     level = logging.DEBUG if enabled else logging.ERROR
-    logging.getLogger("custom_components.gemini_live").setLevel(level)
+    logging.getLogger(__package__).setLevel(level)
 
 def pcm_to_wav(pcm_data: bytes, sample_rate: int = 16000) -> bytes:
     """Wrap raw 16-bit signed PCM mono audio in a WAV container."""
