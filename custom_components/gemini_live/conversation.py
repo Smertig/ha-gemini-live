@@ -56,6 +56,7 @@ from .stt import (
     _is_connection_closed_ok,
     _validate_tool_results,
 )
+from .llm_apis import async_get_llm_api
 from .openai import OpenAIRealtimeClient
 from .runtime import AudioStream, new_conversation_id
 from .sounds import PLAY_SOUND_TOOL_NAME, async_sound_response
@@ -197,10 +198,11 @@ class LiveModelConversationAgent(conversation.ConversationEntity):
             return None, live_tools, system_instruction
 
         try:
-            llm_api = await llm.async_get_api(
-                hass=self.hass,
-                api_id=api_ids,
-                llm_context=llm_context,
+            llm_api = await async_get_llm_api(
+                self.hass,
+                self.hass.data[self.integration_domain][self.entry.entry_id],
+                api_ids,
+                llm_context,
             )
             api_prompt = llm_api.api_prompt
             if custom_instruction:

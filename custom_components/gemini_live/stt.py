@@ -72,6 +72,7 @@ from .const import (
     PROVIDER_OPENAI,
     SUPPORTED_LANGUAGES,
 )
+from .llm_apis import async_get_llm_api
 from .openai import OpenAIRealtimeClient
 from .sounds import (
     PLAY_SOUND_TOOL,
@@ -541,10 +542,11 @@ class LiveModelSTT(SpeechToTextEntity):
 
         if api_ids:
             try:
-                llm_api = await llm.async_get_api(
-                    hass=self.hass,
-                    api_id=api_ids,
-                    llm_context=llm.LLMContext(
+                llm_api = await async_get_llm_api(
+                    self.hass,
+                    entry_data,
+                    api_ids,
+                    llm.LLMContext(
                         platform=self.integration_domain,
                         context=(
                             pipeline_context

@@ -248,3 +248,4 @@ AVAILABLE_VOICES: list[str] = list(
 # Runtime objects stored under hass.data[DOMAIN][config_entry_id].
 GEMINI_SESSION_MANAGER_KEY = "session_manager"
 GEMINI_TURN_STORE_KEY = "turn_store"
+LLM_APIS_KEY = "llm_apis"
