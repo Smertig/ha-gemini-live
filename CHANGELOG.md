@@ -4,6 +4,8 @@ All notable changes to Gemini Live for Home Assistant are documented here.
 
 ## Unreleased
 
+## 1.0.11
+
 - Added a `play_sound` model tool for nonverbal responses: `ok`, `done`,
   `complete`, `cancelled`, `bad`, and `good`. Bundled beep cues are generated
   statically with Python and played through the existing STT/TTS audio handoff
@@ -18,13 +20,17 @@ All notable changes to Gemini Live for Home Assistant are documented here.
 - Fixed Home Assistant Core 2026.10 tool calls failing with a Gemini
   `FunctionResponse` validation error. Convert `llm.ToolResult` to JSON before
   sending it to the provider, preserve failed-call information, and continue
-  supporting dictionary results from older Core versions.
+  supporting dictionary results from older Core versions. Fixes #12.
 - Fixed the Gemini receiver closing after a normal `turnComplete` in barge-in
   mode. Keep listening across completed provider turns until the pipeline
   closes or cancels the microphone stream, allowing interruptions during
   satellite playback and subsequent user utterances.
 - Corrected audio-sender cancellation logs to report whether a response has
   started, rather than attributing every cancellation to the model replying.
+- Preserved completed live sessions between voice turns so continued
+  conversations retain their context, while discarding unfinished turns.
+- Strengthened Google Search grounding instructions to encourage proactive
+  searches for external facts and current information when web search is enabled.
 
 ## 1.0.10
 
