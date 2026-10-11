@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from gemini_live.const import (
     CONF_SUPPORT_BARGE_IN,
+    CONF_RESPONSE_TIMEOUT,
     CONF_TRANSCRIBE_GEMINI,
     CONF_TRANSCRIBE_GPT,
     DOMAIN,
@@ -225,15 +226,19 @@ class ScriptedClient:
     def __init__(self, session: ScriptedSession) -> None:
         self._session = session
         self.captured_config: LiveConfig | None = None
+        self.connect_count = 0
+        self.close_count = 0
 
     def connect(self, config: LiveConfig):
         self.captured_config = config
+        self.connect_count += 1
 
         class _Connect:
             async def __aenter__(self_inner):
                 return self._session
 
             async def __aexit__(self_inner, *_exc):
+                self.close_count += 1
                 return None
 
         return _Connect()
@@ -313,6 +318,72 @@ async def test_unsupported_barge_in_uses_external_vad(
 
     assert entity._effective_support_barge_in() is False
     assert entity.audio_processing.requires_external_vad is True
+
+
+@pytest.mark.parametrize("entity_class", ENTITY_CLASSES)
+@pytest.mark.parametrize("end_state", ["active", "idle", "idle_timeout"])
+async def test_follow_up_reuses_only_completed_barge_in_session(
+    entity_class, end_state: str
+) -> None:
+    completed = end_state != "active"
+    hass = FakeHass()
+    entity, manager, turn_store = _make_entity(
+        hass,
+        {
+            "api_key": "k",
+            CONF_SUPPORT_BARGE_IN: True,
+            CONF_RESPONSE_TIMEOUT: 1 if end_state == "idle_timeout" else 30,
+        },
+        entity_class,
+    )
+    session = ScriptedSession(support_barge_in=True)
+    client = ScriptedClient(session)
+    _bind_client(entity, client)
+    mic = MicStream()
+    result_future = asyncio.Future()
+    task = asyncio.create_task(
+        entity._async_run_audio_stream_sdk(
+            _metadata(),
+            mic.chunks(),
+            "k",
+            "m",
+            "v",
+            "",
+            True,
+            False,
+            True,
+            result_future,
+            "conversation-1",
+            None,
+        )
+    )
+    try:
+        mic.put(MIC_CHUNK)
+        result = await asyncio.wait_for(result_future, 5)
+        turn = turn_store.take_voice_turn("conversation-1", result.text)
+        assert turn is not None
+        if completed:
+            session.release_gate.set()
+            await _wait_until(lambda: manager.is_turn_complete("conversation-1"))
+        assert not task.done()
+
+        # This is the next STT turn's handoff while the old microphone is
+        # still open, exactly as in the satellite logs.
+        if end_state == "idle_timeout":
+            await asyncio.wait_for(task, 5)
+            assert not await manager.async_prepare_for_new_turn("conversation-1")
+        else:
+            assert await manager.async_prepare_for_new_turn("conversation-1")
+            assert task.cancelled()
+        assert client.close_count == (0 if completed else 1)
+        async with manager.acquire("conversation-1", client, client.captured_config):
+            assert client.connect_count == (1 if completed else 2)
+            assert not manager.is_turn_complete("conversation-1")
+        assert manager.should_continue_conversation("conversation-1")
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await manager.async_close_all()
 
 
 @pytest.mark.parametrize("entity_class", ENTITY_CLASSES)

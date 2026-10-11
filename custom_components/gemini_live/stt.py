@@ -101,6 +101,27 @@ _SEARCH_TOOL_INSTRUCTION = (
     "Do not guess current external facts when the search tool can verify them."
 )
 
+_SEARCH_GROUNDING_INSTRUCTION = (
+    "You MUST use the available built-in Google Search grounding to answer "
+    "factual questions that cannot be answered by Home Assistant or its tools. "
+    "Use Home Assistant tools for home/device state and control, and web search "
+    "for external information. For requests combining both, use both sources. "
+    "Search proactively without waiting for the user to ask you to search or "
+    "restate their question. This includes news and headlines (including BBC "
+    "news), current events, external weather and forecasts, and general factual "
+    "questions outside Home Assistant's data. Always search for current, latest, "
+    "recent, live, or time-sensitive information, facts that may have changed, "
+    "and explicit requests to search, look up, check online, or verify. "
+    "Home Assistant's scope restrictions apply to its tools; they do not prevent "
+    "you from answering external questions using Google Search. Built-in search "
+    "is available even when no Home Assistant web-search function is listed. "
+    "Do not claim you cannot access the web or current news without trying "
+    "search first. Use the search results to answer directly; if the user names "
+    "a source such as the BBC, search for and prioritize that source. If search "
+    "fails or does not verify the requested facts, explain that honestly rather "
+    "than inventing results."
+)
+
 _SPENDING_CAP_ERROR_MARKER = "exceeded its monthly spending cap"
 _SPENDING_CAP_ISSUE_PREFIX = "spending_cap_exceeded"
 _SPENDING_CAP_URL = "https://ai.studio/spend"
@@ -280,7 +301,12 @@ def _add_search_tool_instruction(
         native_search_grounding or has_exposed_search_tool
     ):
         return system_instruction
-    return f"{system_instruction}\n\n{_SEARCH_TOOL_INSTRUCTION}"
+    instruction = (
+        _SEARCH_GROUNDING_INSTRUCTION
+        if native_search_grounding
+        else _SEARCH_TOOL_INSTRUCTION
+    )
+    return f"{system_instruction}\n\n{instruction}"
 
 
 def _validate_tool_results(value: Any) -> Any:
@@ -403,12 +429,15 @@ class LiveModelSTT(SpeechToTextEntity):
     def _effective_support_barge_in(self) -> bool:
         """Return whether barge-in is both configured and supported by Core."""
         config = {**self.entry.data, **self.entry.options}
-        return bool(
-            config.get(
-                CONF_SUPPORT_BARGE_IN,
-                DEFAULT_SUPPORT_BARGE_IN,
+        return (
+            bool(
+                config.get(
+                    CONF_SUPPORT_BARGE_IN,
+                    DEFAULT_SUPPORT_BARGE_IN,
+                )
             )
-        ) and supports_tts_interruption()
+            and supports_tts_interruption()
+        )
 
     @property
     def audio_processing(self) -> SpeechAudioProcessing:
@@ -451,7 +480,7 @@ class LiveModelSTT(SpeechToTextEntity):
         session_manager = entry_data[self.session_manager_key]
         if await session_manager.async_prepare_for_new_turn(conversation_id):
             _LOGGER.info(
-                "[turn=%s] cancelled unfinished provider turn for conversation %s",
+                "[turn=%s] stopped previous provider listener for conversation %s",
                 turn_id,
                 conversation_id,
             )
@@ -760,6 +789,16 @@ class LiveModelSTT(SpeechToTextEntity):
                 try:
                     _LOGGER.warning("[turn=%s] receive_responses started", turn_id)
                     async for response in session.receive():
+                        if (
+                            response.user_activity_started
+                            or response.interrupted
+                            or response.input_transcript
+                            or response.tool_calls
+                            or response.audio
+                            or response.text
+                            or response.output_transcript
+                        ):
+                            session_manager.set_turn_complete(conversation_id, False)
                         # Audio packets are frequent and must stay on the hot
                         # path. Logging every packet can stall Home Assistant's
                         # event loop and turn steady PCM into bursty delivery.
@@ -967,6 +1006,7 @@ class LiveModelSTT(SpeechToTextEntity):
                             await response_audio_stream.add_chunk(
                                 response_audio_resampler.flush()
                             )
+                            session_manager.set_turn_complete(conversation_id)
                             if support_barge_in and first_audio.is_set():
                                 # The provider turn is complete, but Home
                                 # Assistant's pipeline run is still open and
@@ -1077,7 +1117,8 @@ class LiveModelSTT(SpeechToTextEntity):
                             await receive_task
                         except asyncio.CancelledError:
                             pass
-                        session_manager.retire_session(conversation_id)
+                        if not session_manager.is_turn_complete(conversation_id):
+                            session_manager.retire_session(conversation_id)
                         break
                     done, _pending = await asyncio.wait(
                         [send_task, receive_task],

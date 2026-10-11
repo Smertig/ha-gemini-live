@@ -48,9 +48,7 @@ def _pipeline_run(
         ),
     ]
     if final_event is not None:
-        events.append(
-            SimpleNamespace(type=final_event, data=None, timestamp="9")
-        )
+        events.append(SimpleNamespace(type=final_event, data=None, timestamp="9"))
     return SimpleNamespace(
         id=run_id,
         pipeline=SimpleNamespace(id="pipeline-1"),
@@ -364,3 +362,51 @@ async def test_retired_session_is_replaced_without_ending_conversation():
         assert second is not first
 
     assert len(created_sessions) == 2
+
+
+@pytest.mark.parametrize("end_state", ["idle", "active", "retired", "ended"])
+async def test_cancelled_listener_preserves_only_idle_conversation(end_state):
+    manager = LiveSessionManager()
+    closed = []
+    sessions = []
+
+    class Client:
+        def connect(self, _config):
+            session = SimpleNamespace(is_open=True)
+            sessions.append(session)
+
+            class Connection:
+                async def __aenter__(self):
+                    return session
+
+                async def __aexit__(self, *_exc):
+                    closed.append(session)
+
+            return Connection()
+
+    ready = asyncio.Event()
+    client = Client()
+    config = _make_config()
+
+    async def listener():
+        async with manager.acquire("conversation-1", client, config):
+            manager.set_turn_complete("conversation-1")
+            if end_state == "active":
+                manager.set_turn_complete("conversation-1", False)
+            elif end_state == "retired":
+                manager.retire_session("conversation-1")
+            elif end_state == "ended":
+                manager.complete_conversation("conversation-1")
+            ready.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(listener())
+    await asyncio.wait_for(ready.wait(), 1)
+    assert await manager.async_prepare_for_new_turn("conversation-1")
+    assert task.cancelled()
+    assert len(closed) == (0 if end_state == "idle" else 1)
+    manager.reset_conversation("conversation-1")
+    async with manager.acquire("conversation-1", client, config) as session:
+        assert (session is sessions[0]) == (end_state == "idle")
+        assert not manager.is_turn_complete("conversation-1")
+    await manager.async_close_all()
