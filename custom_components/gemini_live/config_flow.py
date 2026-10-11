@@ -16,6 +16,7 @@ from .const import (
     CONF_API_KEY,
     CONF_DETAILED_LOGGING,
     CONF_ENCOURAGE_WEB_SEARCH,
+    CONF_ENABLE_SOUND_RESPONSES,
     CONF_MODEL,
     CONF_PROVIDER,
     CONF_RESPONSE_TIMEOUT,
@@ -28,6 +29,7 @@ from .const import (
     CONF_VOICE,
     DEFAULT_AFFECTIVE_DIALOG,
     DEFAULT_ENCOURAGE_WEB_SEARCH,
+    DEFAULT_ENABLE_SOUND_RESPONSES,
     DEFAULT_MODEL,
     DEFAULT_RESPONSE_TIMEOUT,
     DEFAULT_SEARCH_GROUNDING,
@@ -200,6 +202,15 @@ def _provider_schema(
             )
         ),
     }
+    if not is_personaplex:
+        fields[
+            vol.Optional(
+                CONF_ENABLE_SOUND_RESPONSES,
+                default=current.get(
+                    CONF_ENABLE_SOUND_RESPONSES, DEFAULT_ENABLE_SOUND_RESPONSES
+                ),
+            )
+        ] = selector.BooleanSelector()
     if hass is not None and not is_personaplex:
         apis = [
             selector.SelectOptionDict(value=api.id, label=api.name)

@@ -190,6 +190,7 @@ upgrade to the latest version.
 | System instruction | Optional personality and behavior instruction. Instructions from the selected Home Assistant LLM APIs are appended automatically. |
 | LLM APIs | Home Assistant APIs whose tools the model may call. Keep **Assist** selected for smart-home control; integrations such as AI Memory add their own choices, such as **Memory Management**. Multiple APIs can be enabled together. |
 | Detailed logging | Enables verbose logs from this custom integration. These logs can contain transcripts, model details, and tool-call information. |
+| Sound responses | Enables the optional `play_sound` tool for short beep responses instead of speech. Disabled by default. |
 | Transcribe Gemini / GPT | Streams the model's spoken-response transcript into Home Assistant while native audio is still arriving. Disabled by default for the lowest playback latency. |
 | Google Search grounding | Gemini only. Gives the Live model access to Google's built-in Search tool for current or verifiable web information. Optional and disabled by default. Search use may add Gemini API charges. |
 | Thinking level | Gemini 3.8 Live Extended Thinking only. Choose low, medium, or high background reasoning. Higher levels may improve complex answers while increasing latency and cost. |
@@ -268,6 +269,32 @@ The integration sends their tool definitions and results to the live provider
 so it can decide what to call and describe the outcome. Third-party integrations
 that register an LLM API, including AI Memory, appear in the same selector and
 can be enabled alongside Assist.
+
+## Nonverbal response sounds
+
+The model can call `play_sound` instead of speaking when a short cue is enough,
+or when you ask it to "just beep" after an action. The available cues are:
+
+| Sound | Meaning | Pattern |
+| --- | --- | --- |
+| `ok` | Acknowledgement | One short high beep |
+| `done` | Action succeeded | Two ascending beeps |
+| `complete` | Task finished | Three ascending notes |
+| `cancelled` | Cancellation | Two descending beeps |
+| `bad` | Failure or negative result | Two low beeps |
+| `good` | Positive result | Two bright ascending notes |
+
+Enable **Sound responses** in the integration's setup or options to expose the
+tool alongside the selected Home Assistant tools. It is disabled by default.
+The model is instructed to perform actions first and choose a cue matching the
+result. A sound response uses the existing STT-to-TTS audio handoff, suppresses
+subsequent model speech for that response, and keeps the conversation open unless
+the model also calls `end_conversation`. Typed conversations support the same
+tool and show a label such as `[Sound: done]`; audio plays through TTS when used.
+
+The six WAV files are bundled with the integration. To regenerate them after
+changing the note patterns, run `python scripts/generate_sounds.py`. Runtime
+playback does not require synthesis or an external audio service.
 
 ## Enable Google Search
 

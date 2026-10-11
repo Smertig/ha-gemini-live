@@ -16,6 +16,7 @@ from gemini_live.const import (
     CONF_MODEL,
     CONF_RESPONSE_TIMEOUT,
     CONF_SEARCH_GROUNDING,
+    CONF_ENABLE_SOUND_RESPONSES,
     CONF_SUPPORT_BARGE_IN,
     CONF_THINKING_LEVEL,
     CONF_VOICE,
@@ -85,6 +86,27 @@ def test_response_timeout_defaults_and_exposes_range() -> None:
     timeout_selector = _validator(schema, CONF_RESPONSE_TIMEOUT)
     assert timeout_selector.config["min"] == 15
     assert timeout_selector.config["max"] == 120
+
+
+def test_sound_responses_are_opt_in_and_preserved_in_options() -> None:
+    for provider in (PROVIDER_GEMINI, PROVIDER_OPENAI):
+        input_data = {
+            CONF_API_KEY: "key",
+            CONF_MODEL: _available_models(_provider_schema(provider))[0],
+            CONF_VOICE: _VALID_VOICE[provider],
+        }
+        assert (
+            _provider_schema(provider)(input_data)[CONF_ENABLE_SOUND_RESPONSES] is False
+        )
+        assert (
+            _provider_schema(provider, {CONF_ENABLE_SOUND_RESPONSES: True})(input_data)[
+                CONF_ENABLE_SOUND_RESPONSES
+            ]
+            is True
+        )
+    assert CONF_ENABLE_SOUND_RESPONSES not in [
+        marker.schema for marker in _provider_schema(PROVIDER_PERSONAPLEX).schema
+    ]
 
 
 def test_llm_api_selector_lists_registered_apis(monkeypatch) -> None:

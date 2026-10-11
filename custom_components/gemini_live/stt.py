@@ -42,6 +42,7 @@ from .const import (
     CONF_AFFECTIVE_DIALOG,
     CONF_DETAILED_LOGGING,
     CONF_ENCOURAGE_WEB_SEARCH,
+    CONF_ENABLE_SOUND_RESPONSES,
     CONF_MODEL,
     CONF_PROVIDER,
     CONF_RESPONSE_TIMEOUT,
@@ -59,6 +60,7 @@ from .const import (
     DEFAULT_TRANSCRIBE_GEMINI,
     DEFAULT_TRANSCRIBE_GPT,
     DEFAULT_ENCOURAGE_WEB_SEARCH,
+    DEFAULT_ENABLE_SOUND_RESPONSES,
     DEFAULT_SYSTEM_INSTRUCTION,
     DEFAULT_SEARCH_GROUNDING,
     DOMAIN,
@@ -71,6 +73,12 @@ from .const import (
     SUPPORTED_LANGUAGES,
 )
 from .openai import OpenAIRealtimeClient
+from .sounds import (
+    PLAY_SOUND_TOOL,
+    PLAY_SOUND_TOOL_NAME,
+    SOUND_INSTRUCTION,
+    async_sound_response,
+)
 from .runtime import (
     AudioStream,
     PipelineTurn,
@@ -279,14 +287,25 @@ def _format_tools_for_live(
 
 def _add_end_conversation_tool(
     tools: list[LiveTool],
+    *,
+    enable_sound_responses: bool = False,
 ) -> list[LiveTool]:
-    """Add the integration-owned conversation completion callback."""
-    return [*tools, _END_CONVERSATION_TOOL]
+    """Add integration-owned response and conversation tools."""
+    return [
+        *tools,
+        _END_CONVERSATION_TOOL,
+        *([PLAY_SOUND_TOOL] if enable_sound_responses else []),
+    ]
 
 
-def _add_end_conversation_instruction(system_instruction: str) -> str:
+def _add_end_conversation_instruction(
+    system_instruction: str, *, enable_sound_responses: bool = False
+) -> str:
     """Tell Gemini when to finish the Home Assistant conversation."""
-    return f"{system_instruction}\n\n{_END_CONVERSATION_INSTRUCTION}"
+    instruction = f"{system_instruction}\n\n{_END_CONVERSATION_INSTRUCTION}"
+    if enable_sound_responses:
+        instruction += f"\n\n{SOUND_INSTRUCTION}"
+    return instruction
 
 
 def _add_search_tool_instruction(
@@ -515,6 +534,9 @@ class LiveModelSTT(SpeechToTextEntity):
         response_inactivity_timeout = float(
             config.get(CONF_RESPONSE_TIMEOUT, DEFAULT_RESPONSE_TIMEOUT)
         )
+        sound_responses_enabled = bool(
+            config.get(CONF_ENABLE_SOUND_RESPONSES, DEFAULT_ENABLE_SOUND_RESPONSES)
+        )
         api_ids = config.get(CONF_LLM_HASS_API, [llm.LLM_API_ASSIST])
 
         if api_ids:
@@ -568,7 +590,9 @@ class LiveModelSTT(SpeechToTextEntity):
                 encourage_web_search,
                 native_search_grounding=True,
             )
-        system_instruction = _add_end_conversation_instruction(system_instruction)
+        system_instruction = _add_end_conversation_instruction(
+            system_instruction, enable_sound_responses=sound_responses_enabled
+        )
 
         live_tools = _add_end_conversation_tool(
             _format_tools_for_live(
@@ -577,7 +601,8 @@ class LiveModelSTT(SpeechToTextEntity):
                 encourage_web_search and not self.supports_search_grounding,
             )
             if llm_api
-            else []
+            else [],
+            enable_sound_responses=sound_responses_enabled,
         )
         _LOGGER.debug(
             "Exposing %d tools to the live model: %s",
@@ -645,6 +670,7 @@ class LiveModelSTT(SpeechToTextEntity):
         audio_response_chunk_count = 0
         audio_response_bytes = 0
         audio_sent = False
+        sound_selected = False
         last_response_activity = time.monotonic()
         gemini_replied = asyncio.Event()
         first_audio = asyncio.Event()
@@ -785,6 +811,7 @@ class LiveModelSTT(SpeechToTextEntity):
             async def receive_responses() -> None:
                 nonlocal audio_response_bytes, audio_response_chunk_count
                 nonlocal last_response_activity
+                nonlocal sound_selected
                 replacement_response_pending = False
                 try:
                     _LOGGER.warning("[turn=%s] receive_responses started", turn_id)
@@ -819,6 +846,7 @@ class LiveModelSTT(SpeechToTextEntity):
                         if response.user_activity_stopped:
                             _LOGGER.debug("[turn=%s] user activity stopped", turn_id)
                         if response.interrupted:
+                            sound_selected = False
                             # An interrupted generation is followed by a
                             # replacement response in the same provider turn.
                             # Discard queued output audio but keep the Home
@@ -875,6 +903,42 @@ class LiveModelSTT(SpeechToTextEntity):
                                         "success": True,
                                         "conversation_ended": True,
                                     }
+                                elif tool_name == PLAY_SOUND_TOOL_NAME:
+                                    if not sound_responses_enabled:
+                                        tool_result = {
+                                            "error": "Sound responses are disabled"
+                                        }
+                                    elif sound_selected:
+                                        tool_result = {
+                                            "error": "A sound was already selected for this response"
+                                        }
+                                    else:
+                                        pcm, tool_result = await async_sound_response(
+                                            tool_args
+                                        )
+                                        if pcm:
+                                            sound_selected = True
+                                            replacement_response_pending = False
+                                            response_audio_stream.interrupt()
+                                            response_audio_resampler.reset()
+                                            text_response_parts.clear()
+                                            label = f"[Sound: {tool_result['sound']}]"
+                                            text_response_parts.append(label)
+                                            if response_text_stream is not None:
+                                                response_text_stream.add_chunk(label)
+                                            gemini_replied.set()
+                                            first_audio.set()
+                                            audio_response_chunk_count += 1
+                                            audio_response_bytes += len(pcm)
+                                            for offset in range(
+                                                0, len(pcm), OPTIMAL_STREAM_CHUNK_SIZE
+                                            ):
+                                                await response_audio_stream.add_chunk(
+                                                    pcm[
+                                                        offset : offset
+                                                        + OPTIMAL_STREAM_CHUNK_SIZE
+                                                    ]
+                                                )
                                 elif llm_api is not None:
                                     try:
                                         tool_input = llm.ToolInput(
@@ -928,12 +992,12 @@ class LiveModelSTT(SpeechToTextEntity):
 
                         last_response_activity = time.monotonic()
 
-                        if response.text:
+                        if response.text and not sound_selected:
                             text_response_parts.append(response.text)
                             if response_text_stream is not None:
                                 response_text_stream.add_chunk(response.text)
 
-                        if response.audio:
+                        if response.audio and not sound_selected:
                             if not gemini_replied.is_set():
                                 gemini_replied.set()
                                 if support_barge_in:
@@ -954,7 +1018,11 @@ class LiveModelSTT(SpeechToTextEntity):
                             )
                             first_audio.set()
 
-                        if transcribe_output and response.output_transcript:
+                        if (
+                            transcribe_output
+                            and response.output_transcript
+                            and not sound_selected
+                        ):
                             transcription = response.output_transcript
                             _LOGGER.debug(
                                 "[turn=%s] output transcription chunk len=%d",

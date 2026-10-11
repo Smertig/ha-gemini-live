@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from gemini_live.const import (
     CONF_SUPPORT_BARGE_IN,
+    CONF_ENABLE_SOUND_RESPONSES,
     CONF_RESPONSE_TIMEOUT,
     CONF_TRANSCRIBE_GEMINI,
     CONF_TRANSCRIBE_GPT,
@@ -22,7 +23,8 @@ from gemini_live.const import (
     GEMINI_SESSION_MANAGER_KEY,
     GEMINI_TURN_STORE_KEY,
 )
-from gemini_live.live import LiveConfig, LiveEvent
+from gemini_live.live import LiveConfig, LiveEvent, LiveToolCall
+from gemini_live.sounds import SOUND_NAMES, PLAY_SOUND_TOOL, load_sound_pcm
 from gemini_live.runtime import LiveSessionManager, TurnStore
 from gemini_live.stt import (
     GeminiLiveSTT,
@@ -318,6 +320,185 @@ async def test_unsupported_barge_in_uses_external_vad(
 
     assert entity._effective_support_barge_in() is False
     assert entity.audio_processing.requires_external_vad is True
+
+
+@pytest.mark.parametrize("name", SOUND_NAMES)
+@pytest.mark.parametrize("barge_in", [False, True])
+@pytest.mark.parametrize("transcribe_output", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_sound_tool_plays_cue_without_model_speech(
+    name, barge_in, transcribe_output, enabled
+):
+    hass = FakeHass()
+    entity, manager, turns = _make_entity(
+        hass, {"api_key": "k", CONF_ENABLE_SOUND_RESPONSES: enabled}, GeminiLiveSTT
+    )
+
+    class SoundSession(ScriptedSession):
+        def __init__(self):
+            super().__init__(support_barge_in=barge_in)
+            self.tool_responses = []
+
+        async def send_tool_responses(self, responses):
+            self.tool_responses.extend(responses)
+
+        async def receive(self):
+            yield LiveEvent(input_transcript="Please just beep")
+            yield LiveEvent(
+                tool_calls=[LiveToolCall("play_sound", "cue-1", {"sound": name})]
+            )
+            yield LiveEvent(
+                tool_calls=[LiveToolCall("play_sound", "cue-2", {"sound": "bad"})]
+            )
+            # Even if the model ignores the instruction, its speech must not
+            # be mixed with the selected cue or added to the transcript.
+            yield LiveEvent(
+                audio=AUDIO_A,
+                text="Spoken acknowledgement",
+                output_transcript="Spoken acknowledgement",
+            )
+            yield LiveEvent(turn_complete=True)
+            if barge_in:
+                await asyncio.Event().wait()
+
+    session = SoundSession()
+    client = ScriptedClient(session)
+    _bind_client(entity, client)
+    mic = MicStream()
+    result_future = asyncio.Future()
+    task = asyncio.create_task(
+        entity._async_run_audio_stream_sdk(
+            _metadata(),
+            mic.chunks(),
+            "k",
+            "native-audio-test",
+            "v",
+            "",
+            transcribe_output,
+            False,
+            barge_in,
+            result_future,
+            "conversation-1",
+            None,
+        )
+    )
+    consumer = None
+    try:
+        mic.put(MIC_CHUNK)
+        if not barge_in:
+            mic.close()
+        result = await asyncio.wait_for(result_future, 5)
+        assert result.text == "Please just beep"
+        turn = turns.take_voice_turn("conversation-1", result.text)
+        assert turn is not None
+
+        async def consume():
+            return b"".join([chunk async for chunk in turn.audio.async_chunks()])
+
+        consumer = asyncio.create_task(consume())
+        expected_audio = (
+            load_sound_pcm(name) if enabled else resample_24k_to_16k(AUDIO_A)
+        )
+        assert await asyncio.wait_for(consumer, 5) == expected_audio
+        if transcribe_output:
+            assert turn.assistant_text_stream.text == (
+                f"[Sound: {name}]"
+                if enabled
+                else "Spoken acknowledgementSpoken acknowledgement"
+            )
+        assert session.tool_responses[0].call_id == "cue-1"
+        assert ("success" in session.tool_responses[0].response) is enabled
+        assert "error" in session.tool_responses[1].response
+        assert (
+            any(tool.name == "play_sound" for tool in client.captured_config.tools)
+            is enabled
+        )
+        assert ("play_sound" in client.captured_config.system_instruction) is enabled
+        assert manager.should_continue_conversation("conversation-1")
+        if barge_in:
+            assert await manager.async_prepare_for_new_turn("conversation-1")
+            assert client.close_count == 0
+        else:
+            await asyncio.wait_for(task, 5)
+    finally:
+        task.cancel()
+        if consumer is not None:
+            consumer.cancel()
+        await asyncio.gather(
+            task, *([consumer] if consumer else []), return_exceptions=True
+        )
+        await manager.async_close_all()
+
+
+@pytest.mark.parametrize("name", ["done", "../done"])
+@pytest.mark.parametrize("end_conversation", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_typed_sound_response_and_invalid_sound_fallback(
+    name, end_conversation, enabled
+):
+    from gemini_live.conversation import GeminiLiveConversationAgent
+    from gemini_live.utils import pcm_to_wav
+
+    hass = FakeHass()
+    entity, manager, turns = _make_entity(
+        hass,
+        {
+            "api_key": "k",
+            "model": "native-audio-test",
+            "voice": "v",
+            CONF_ENABLE_SOUND_RESPONSES: enabled,
+        },
+        GeminiLiveSTT,
+    )
+    agent = GeminiLiveConversationAgent(hass, entity.entry)
+
+    class TextSession(ScriptedSession):
+        def __init__(self):
+            super().__init__(support_barge_in=False)
+            self.tool_responses = []
+
+        async def send_text(self, text):
+            assert text == "Just beep"
+
+        async def send_tool_responses(self, responses):
+            self.tool_responses.extend(responses)
+
+        async def receive(self):
+            calls = [LiveToolCall("play_sound", "cue-1", {"sound": name})]
+            if end_conversation:
+                calls.append(LiveToolCall("end_conversation", "end-1", {}))
+            yield LiveEvent(tool_calls=calls)
+            yield LiveEvent(audio=AUDIO_A, output_transcript="Fallback speech")
+            yield LiveEvent(turn_complete=True)
+
+    session = TextSession()
+    _bind_client(agent, ScriptedClient(session))
+
+    async def fake_llm_api(_context):
+        return None, [PLAY_SOUND_TOOL], "Test instruction"
+
+    agent._async_get_llm_api = fake_llm_api
+    user_input = SimpleNamespace(as_llm_context=lambda _domain: None)
+    try:
+        response = await agent._async_process_text_live(
+            "Just beep", user_input, "conversation-1"
+        )
+        if name == "done" and enabled:
+            assert response == "[Sound: done]"
+            assert turns.take_audio(response) == pcm_to_wav(load_sound_pcm("done"))
+            assert session.tool_responses[0].response["success"]
+        else:
+            assert response == "Fallback speech"
+            assert turns.take_audio(response) == pcm_to_wav(
+                resample_24k_to_16k(AUDIO_A)
+            )
+            assert "error" in session.tool_responses[0].response
+        assert (
+            manager.should_continue_conversation("conversation-1")
+            is not end_conversation
+        )
+    finally:
+        await manager.async_close_all()
 
 
 @pytest.mark.parametrize("entity_class", ENTITY_CLASSES)

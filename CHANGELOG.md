@@ -4,6 +4,12 @@ All notable changes to Gemini Live for Home Assistant are documented here.
 
 ## Unreleased
 
+- Added a `play_sound` model tool for nonverbal responses: `ok`, `done`,
+  `complete`, `cancelled`, `bad`, and `good`. Bundled beep cues are generated
+  statically with Python and played through the existing STT/TTS audio handoff
+  instead of model speech, with support for typed conversations as well.
+  Enable the optional **Sound responses** setting to expose the tool; it is
+  disabled by default.
 - Fixed voice turns being processed twice after Core's pipeline refactor by
   resolving the active STT run from its event engine rather than its removed
   provider attribute.
