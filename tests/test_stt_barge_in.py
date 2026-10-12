@@ -24,7 +24,7 @@ from gemini_live.const import (
     GEMINI_TURN_STORE_KEY,
 )
 from gemini_live.live import LiveConfig, LiveEvent, LiveToolCall
-from gemini_live.sounds import SOUND_NAMES, PLAY_SOUND_TOOL, load_sound_pcm
+from gemini_live.sounds import PLAY_SOUND_TOOL, load_sound_pcm
 from gemini_live.runtime import LiveSessionManager, TurnStore
 from gemini_live.stt import (
     GeminiLiveSTT,
@@ -322,12 +322,11 @@ async def test_unsupported_barge_in_uses_external_vad(
     assert entity.audio_processing.requires_external_vad is True
 
 
-@pytest.mark.parametrize("name", SOUND_NAMES)
 @pytest.mark.parametrize("barge_in", [False, True])
 @pytest.mark.parametrize("transcribe_output", [False, True])
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_sound_tool_plays_cue_without_model_speech(
-    name, barge_in, transcribe_output, enabled
+    barge_in, transcribe_output, enabled
 ):
     hass = FakeHass()
     entity, manager, turns = _make_entity(
@@ -345,10 +344,10 @@ async def test_sound_tool_plays_cue_without_model_speech(
         async def receive(self):
             yield LiveEvent(input_transcript="Please just beep")
             yield LiveEvent(
-                tool_calls=[LiveToolCall("play_sound", "cue-1", {"sound": name})]
+                tool_calls=[LiveToolCall("play_sound", "cue-1", {})]
             )
             yield LiveEvent(
-                tool_calls=[LiveToolCall("play_sound", "cue-2", {"sound": "bad"})]
+                tool_calls=[LiveToolCall("play_sound", "cue-2", {})]
             )
             # Even if the model ignores the instruction, its speech must not
             # be mixed with the selected cue or added to the transcript.
@@ -397,12 +396,12 @@ async def test_sound_tool_plays_cue_without_model_speech(
 
         consumer = asyncio.create_task(consume())
         expected_audio = (
-            load_sound_pcm(name) if enabled else resample_24k_to_16k(AUDIO_A)
+            load_sound_pcm() if enabled else resample_24k_to_16k(AUDIO_A)
         )
         assert await asyncio.wait_for(consumer, 5) == expected_audio
         if transcribe_output:
             assert turn.assistant_text_stream.text == (
-                f"[Sound: {name}]"
+                "[Sound: done]"
                 if enabled
                 else "Spoken acknowledgementSpoken acknowledgement"
             )
@@ -414,10 +413,10 @@ async def test_sound_tool_plays_cue_without_model_speech(
             is enabled
         )
         assert ("play_sound" in client.captured_config.system_instruction) is enabled
-        assert manager.should_continue_conversation("conversation-1")
+        assert manager.should_continue_conversation("conversation-1") is not enabled
         if barge_in:
             assert await manager.async_prepare_for_new_turn("conversation-1")
-            assert client.close_count == 0
+            assert client.close_count == int(enabled)
         else:
             await asyncio.wait_for(task, 5)
     finally:
@@ -430,11 +429,11 @@ async def test_sound_tool_plays_cue_without_model_speech(
         await manager.async_close_all()
 
 
-@pytest.mark.parametrize("name", ["done", "../done"])
+@pytest.mark.parametrize("arguments", [{}, {"sound": "bad"}])
 @pytest.mark.parametrize("end_conversation", [False, True])
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_typed_sound_response_and_invalid_sound_fallback(
-    name, end_conversation, enabled
+    arguments, end_conversation, enabled
 ):
     from gemini_live.conversation import GeminiLiveConversationAgent
     from gemini_live.utils import pcm_to_wav
@@ -464,7 +463,7 @@ async def test_typed_sound_response_and_invalid_sound_fallback(
             self.tool_responses.extend(responses)
 
         async def receive(self):
-            calls = [LiveToolCall("play_sound", "cue-1", {"sound": name})]
+            calls = [LiveToolCall("play_sound", "cue-1", arguments)]
             if end_conversation:
                 calls.append(LiveToolCall("end_conversation", "end-1", {}))
             yield LiveEvent(tool_calls=calls)
@@ -483,9 +482,9 @@ async def test_typed_sound_response_and_invalid_sound_fallback(
         response = await agent._async_process_text_live(
             "Just beep", user_input, "conversation-1"
         )
-        if name == "done" and enabled:
+        if not arguments and enabled:
             assert response == "[Sound: done]"
-            assert turns.take_audio(response) == pcm_to_wav(load_sound_pcm("done"))
+            assert turns.take_audio(response) == pcm_to_wav(load_sound_pcm())
             assert session.tool_responses[0].response["success"]
         else:
             assert response == "Fallback speech"
@@ -495,7 +494,7 @@ async def test_typed_sound_response_and_invalid_sound_fallback(
             assert "error" in session.tool_responses[0].response
         assert (
             manager.should_continue_conversation("conversation-1")
-            is not end_conversation
+            is (not end_conversation and not (enabled and not arguments))
         )
     finally:
         await manager.async_close_all()

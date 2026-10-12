@@ -917,6 +917,9 @@ class LiveModelSTT(SpeechToTextEntity):
                                             tool_args
                                         )
                                         if pcm:
+                                            session_manager.complete_conversation(
+                                                conversation_id
+                                            )
                                             sound_selected = True
                                             replacement_response_pending = False
                                             response_audio_stream.interrupt()

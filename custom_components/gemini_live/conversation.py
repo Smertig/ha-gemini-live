@@ -372,6 +372,10 @@ class LiveModelConversationAgent(conversation.ConversationEntity):
                                             tool_args
                                         )
                                         if pcm:
+                                            conversation_ended = True
+                                            session_manager.complete_conversation(
+                                                conversation_id
+                                            )
                                             sound_selected = True
                                             text_response_parts.clear()
                                             text_response_parts.append(

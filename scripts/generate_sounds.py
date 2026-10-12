@@ -11,17 +11,12 @@ import wave
 
 SAMPLE_RATE = 16000
 PATTERNS = {
-    "ok": [(880, 0.12)],
     "done": [(660, 0.10), (880, 0.15)],
-    "complete": [(523.25, 0.10), (659.25, 0.10), (783.99, 0.22)],
-    "cancelled": [(660, 0.12), (440, 0.18)],
-    "bad": [(220, 0.16), (220, 0.16)],
-    "good": [(783.99, 0.10), (1046.50, 0.20)],
 }
 
 
 def generate(output_dir: Path) -> None:
-    """Write distinct, softly enveloped 16 kHz mono PCM cues."""
+    """Write the softly enveloped 16 kHz mono PCM done cue."""
     output_dir.mkdir(parents=True, exist_ok=True)
     for name, notes in PATTERNS.items():
         samples = [0] * int(SAMPLE_RATE * 0.02)

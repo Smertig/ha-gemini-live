@@ -4,6 +4,11 @@ All notable changes to Gemini Live for Home Assistant are documented here.
 
 ## Unreleased
 
+- Simplified `play_sound` to a tool with no arguments that plays only the `done`
+  cue. Removed the other sound assets and choices from the API.
+- Successful sound responses now end both voice and typed conversations, just
+  like `end_conversation`. Failed sound calls leave the conversation open.
+
 ## 1.0.11
 
 - Added a `play_sound` model tool for nonverbal responses: `ok`, `done`,

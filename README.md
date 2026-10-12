@@ -272,28 +272,20 @@ can be enabled alongside Assist.
 
 ## Nonverbal response sounds
 
-The model can call `play_sound` instead of speaking when a short cue is enough,
-or when you ask it to "just beep" after an action. The available cues are:
-
-| Sound | Meaning | Pattern |
-| --- | --- | --- |
-| `ok` | Acknowledgement | One short high beep |
-| `done` | Action succeeded | Two ascending beeps |
-| `complete` | Task finished | Three ascending notes |
-| `cancelled` | Cancellation | Two descending beeps |
-| `bad` | Failure or negative result | Two low beeps |
-| `good` | Positive result | Two bright ascending notes |
+The model can call `play_sound` with no arguments instead of speaking after an
+action succeeds, or when you ask it to "just beep" after an action. It plays the
+`done` cue (two ascending beeps) and ends the conversation, just like
+`end_conversation`. Questions or failures needing an explanation use speech.
 
 Enable **Sound responses** in the integration's setup or options to expose the
 tool alongside the selected Home Assistant tools. It is disabled by default.
-The model is instructed to perform actions first and choose a cue matching the
-result. A sound response uses the existing STT-to-TTS audio handoff, suppresses
-subsequent model speech for that response, and keeps the conversation open unless
-the model also calls `end_conversation`. Typed conversations support the same
-tool and show a label such as `[Sound: done]`; audio plays through TTS when used.
+The model is instructed to perform actions first. A sound response uses the
+existing STT-to-TTS audio handoff and suppresses subsequent model speech for that
+response. Typed conversations support the same tool and show `[Sound: done]`;
+audio plays through TTS when used. A failed sound call leaves the conversation open.
 
-The six WAV files are bundled with the integration. To regenerate them after
-changing the note patterns, run `python scripts/generate_sounds.py`. Runtime
+The `done.wav` file is bundled with the integration. To regenerate it after
+changing the note pattern, run `python scripts/generate_sounds.py`. Runtime
 playback does not require synthesis or an external audio service.
 
 ## Enable Google Search
