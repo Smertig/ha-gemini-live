@@ -33,7 +33,8 @@ def async_setup_runtime(
     setting up a config entry. ``llm_apis`` are selectable by id in
     ``CONF_LLM_HASS_API`` without being registered in Home Assistant.
     """
-    hass.data.setdefault(DOMAIN, {})
+    if entry_id in hass.data.setdefault(DOMAIN, {}):
+        raise ValueError(f"Live-model runtime {entry_id} is already set up")
     set_detailed_logging(bool(config.get(CONF_DETAILED_LOGGING, False)))
     hass.data[DOMAIN][entry_id] = {
         **config,

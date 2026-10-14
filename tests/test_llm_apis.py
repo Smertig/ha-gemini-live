@@ -1,5 +1,7 @@
 """Tests for LLM APIs supplied by an integration hosting the entities."""
 
+import asyncio
+
 from homeassistant.helpers import llm
 import pytest
 
@@ -111,3 +113,23 @@ async def test_teardown_closes_sessions_and_drops_runtime() -> None:
 
     assert closed == [True]
     assert "entry" not in hass.data[DOMAIN]
+
+
+def test_runtime_is_not_set_up_twice() -> None:
+    hass = FakeHass()
+    async_setup_runtime(hass, "entry", {})
+
+    with pytest.raises(ValueError, match="already set up"):
+        async_setup_runtime(hass, "entry", {})
+
+
+async def test_teardown_stops_running_turns() -> None:
+    hass = FakeHass()
+    async_setup_runtime(hass, "entry", {})
+    session_manager = hass.data[DOMAIN]["entry"][GEMINI_SESSION_MANAGER_KEY]
+    turn = asyncio.create_task(asyncio.Event().wait())
+    session_manager._active_turn_tasks["conversation"] = turn
+
+    await async_teardown_runtime(hass, "entry")
+
+    assert turn.cancelled()

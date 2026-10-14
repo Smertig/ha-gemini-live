@@ -358,7 +358,9 @@ class LiveSessionManager:
                     self._sessions_to_retire.discard(conversation_id)
 
     async def async_close_all(self) -> None:
-        """Close every open Live connection."""
+        """Stop running turns and close every open Live connection."""
+        for conversation_id in list(self._active_turn_tasks):
+            await self._async_cancel_active_turn(conversation_id)
         for conversation_id, connection in list(self._connections.items()):
             await self._async_close(conversation_id, connection)
         self._completed_conversations.clear()
