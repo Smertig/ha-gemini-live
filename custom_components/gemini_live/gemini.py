@@ -28,8 +28,8 @@ _SUPPORTED_SCHEMA_KEYS = {
 }
 
 # Model generations whose default function-calling mode is asynchronous
-# (NON_BLOCKING). The integration executes tools synchronously inside its
-# receive loop, so its tool declarations must opt back into BLOCKING
+# (NON_BLOCKING). The integration answers each tool call before the model
+# continues, so its tool declarations must opt back into BLOCKING
 # behaviour on these models.
 _ASYNC_FUNCTION_CALLING_MODEL_PREFIXES = ("gemini-3.8",)
 
@@ -104,6 +104,9 @@ class GeminiLiveSession:
         self._session = session
         self._support_barge_in = support_barge_in
         self._extended_thinking = extended_thinking
+        # Tool calls the model still waits a response for; the turn goes on
+        # after a turn_complete until they are answered.
+        self._unanswered_call_ids: set[str | None] = set()
         # Describes the most recent client message handed to the provider, so
         # a transport failure can be attributed to the message that likely
         # triggered it. The setup message counts as accepted once connect()
@@ -150,6 +153,9 @@ class GeminiLiveSession:
                 for response in responses
             ]
         )
+        self._unanswered_call_ids.difference_update(
+            response.call_id for response in responses
+        )
         self.last_outgoing = (
             f"tool_response for {[response.name for response in responses]}"
         )
@@ -162,6 +168,8 @@ class GeminiLiveSession:
                 interaction_status = _interaction_status(response)
                 interaction_in_progress = interaction_status == "IN_PROGRESS"
                 if response.tool_call:
+                    calls = response.tool_call.function_calls or []
+                    self._unanswered_call_ids.update(call.id for call in calls)
                     yield LiveEvent(
                         tool_calls=[
                             LiveToolCall(
@@ -169,7 +177,7 @@ class GeminiLiveSession:
                                 call_id=call.id,
                                 arguments=_escape_decode(call.args or {}),
                             )
-                            for call in response.tool_call.function_calls or []
+                            for call in calls
                         ]
                     )
 
@@ -198,9 +206,13 @@ class GeminiLiveSession:
                         # the same session must accept another user utterance.
                         # The STT owner closes/cancels this iterator when its
                         # pipeline microphone stream ends.
-                        receive_next_turn = self._support_barge_in or (
-                            self._extended_thinking
-                            and (interrupted_turn or interaction_in_progress)
+                        receive_next_turn = (
+                            self._support_barge_in
+                            or bool(self._unanswered_call_ids)
+                            or (
+                                self._extended_thinking
+                                and (interrupted_turn or interaction_in_progress)
+                            )
                         )
                     terminal_turn = bool(content.turn_complete) and not (
                         self._extended_thinking and interaction_in_progress

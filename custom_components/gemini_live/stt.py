@@ -47,6 +47,7 @@ from .const import (
     CONF_PROVIDER,
     CONF_RESPONSE_TIMEOUT,
     CONF_SEARCH_GROUNDING,
+    CONF_TOOL_TIMEOUT,
     CONF_SYSTEM_INSTRUCTION,
     CONF_SUPPORT_BARGE_IN,
     CONF_THINKING_LEVEL,
@@ -56,6 +57,7 @@ from .const import (
     DEFAULT_AFFECTIVE_DIALOG,
     DEFAULT_RESPONSE_TIMEOUT,
     DEFAULT_SUPPORT_BARGE_IN,
+    DEFAULT_TOOL_TIMEOUT,
     DEFAULT_THINKING_LEVEL,
     DEFAULT_TRANSCRIBE_GEMINI,
     DEFAULT_TRANSCRIBE_GPT,
@@ -535,6 +537,7 @@ class LiveModelSTT(SpeechToTextEntity):
         response_inactivity_timeout = float(
             config.get(CONF_RESPONSE_TIMEOUT, DEFAULT_RESPONSE_TIMEOUT)
         )
+        tool_timeout = float(config.get(CONF_TOOL_TIMEOUT, DEFAULT_TOOL_TIMEOUT))
         sound_responses_enabled = bool(
             config.get(CONF_ENABLE_SOUND_RESPONSES, DEFAULT_ENABLE_SOUND_RESPONSES)
         )
@@ -810,6 +813,77 @@ class LiveModelSTT(SpeechToTextEntity):
                     )
                     raise
 
+            # LLM API tool calls run beside the receive loop, so model audio,
+            # barge-in and transcripts keep flowing while a slow tool works.
+            tool_tasks: set[asyncio.Task[None]] = set()
+            unanswered_call_ids: set[str | None] = set()
+
+            async def call_llm_tool(call: Any) -> LiveToolResponse:
+                tool_name = call.name or ""
+                try:
+                    async with asyncio.timeout(tool_timeout):
+                        tool_result = await llm_api.async_call_tool(
+                            llm.ToolInput(tool_name=tool_name, tool_args=call.arguments)
+                        )
+                except TimeoutError:
+                    _LOGGER.error(
+                        "Tool %s timed out after %.0fs", tool_name, tool_timeout
+                    )
+                    tool_result = {
+                        "error": f"Tool timed out after {tool_timeout:.0f}s"
+                    }
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.error("Tool %s failed: %s", tool_name, err)
+                    tool_result = {"error": str(err)}
+                tool_result = _validate_tool_results(tool_result)
+                _LOGGER.debug(
+                    "[turn=%s] LLM tool response name=%s id=%s response=%r",
+                    turn_id,
+                    tool_name,
+                    call.call_id,
+                    tool_result,
+                )
+                return LiveToolResponse(tool_name, call.call_id, tool_result)
+
+            async def send_tool_responses(responses: list[LiveToolResponse]) -> None:
+                nonlocal last_response_activity
+                _LOGGER.warning(
+                    "[turn=%s] sending %d tool response(s) to the live model",
+                    turn_id,
+                    len(responses),
+                )
+                await session.send_tool_responses(responses)
+                unanswered_call_ids.difference_update(
+                    response.call_id for response in responses
+                )
+                last_response_activity = time.monotonic()
+                _LOGGER.warning(
+                    "[turn=%s] sent %d tool response(s) to the live model",
+                    turn_id,
+                    len(responses),
+                )
+
+            async def answer_in_background(
+                ready: list[LiveToolResponse], calls: list[Any]
+            ) -> None:
+                # The model expects all responses to one event's calls at once.
+                responses = ready + list(
+                    await asyncio.gather(*(call_llm_tool(call) for call in calls))
+                )
+                try:
+                    await send_tool_responses(responses)
+                except Exception:  # noqa: BLE001
+                    # The receive loop sees the broken connection and ends the turn.
+                    _LOGGER.exception(
+                        "[turn=%s] failed to send tool responses", turn_id
+                    )
+
+            def keep_alive_while_tools_run() -> None:
+                # Bounded by the tool timeout, so a hung tool cannot hold the turn.
+                nonlocal last_response_activity
+                if tool_tasks:
+                    last_response_activity = time.monotonic()
+
             async def receive_responses() -> None:
                 nonlocal audio_response_bytes, audio_response_chunk_count
                 nonlocal last_response_activity
@@ -878,6 +952,10 @@ class LiveModelSTT(SpeechToTextEntity):
                             last_response_activity = time.monotonic()
                             function_calls = response.tool_calls
                             function_responses = []
+                            background_calls = []
+                            unanswered_call_ids.update(
+                                call.call_id for call in function_calls
+                            )
 
                             _LOGGER.warning(
                                 "[turn=%s] tool_call count=%d",
@@ -945,19 +1023,8 @@ class LiveModelSTT(SpeechToTextEntity):
                                                     ]
                                                 )
                                 elif llm_api is not None:
-                                    try:
-                                        tool_input = llm.ToolInput(
-                                            tool_name=tool_name,
-                                            tool_args=tool_args,
-                                        )
-                                        tool_result = await llm_api.async_call_tool(
-                                            tool_input
-                                        )
-                                    except Exception as err:  # noqa: BLE001
-                                        _LOGGER.error(
-                                            "Tool %s failed: %s", tool_name, err
-                                        )
-                                        tool_result = {"error": str(err)}
+                                    background_calls.append(call)
+                                    continue
                                 else:
                                     tool_result = {"error": "HA LLM API not available"}
                                 tool_result = _validate_tool_results(tool_result)
@@ -982,18 +1049,16 @@ class LiveModelSTT(SpeechToTextEntity):
                                     LiveToolResponse(tool_name, call_id, tool_result)
                                 )
 
-                            if function_responses:
-                                _LOGGER.warning(
-                                    "[turn=%s] sending %d tool response(s) to the live model",
-                                    turn_id,
-                                    len(function_responses),
+                            if background_calls:
+                                task = asyncio.create_task(
+                                    answer_in_background(
+                                        function_responses, background_calls
+                                    )
                                 )
-                                await session.send_tool_responses(function_responses)
-                                _LOGGER.warning(
-                                    "[turn=%s] sent %d tool response(s) to the live model",
-                                    turn_id,
-                                    len(function_responses),
-                                )
+                                tool_tasks.add(task)
+                                task.add_done_callback(tool_tasks.discard)
+                            elif function_responses:
+                                await send_tool_responses(function_responses)
 
                         last_response_activity = time.monotonic()
 
@@ -1061,6 +1126,15 @@ class LiveModelSTT(SpeechToTextEntity):
                             )
 
                         if response.turn_complete:
+                            if unanswered_call_ids:
+                                # The model continues once it has the tool
+                                # responses; this is not the end of its answer.
+                                _LOGGER.debug(
+                                    "[turn=%s] turnComplete while %d tool call(s) await responses; waiting",
+                                    turn_id,
+                                    len(unanswered_call_ids),
+                                )
+                                continue
                             if support_barge_in and replacement_response_pending:
                                 # This completes the interrupted assistant
                                 # generation, not the whole HA response stream.
@@ -1176,6 +1250,7 @@ class LiveModelSTT(SpeechToTextEntity):
             try:
                 done: set[asyncio.Task[Any]] = set()
                 while not done:
+                    keep_alive_while_tools_run()
                     remaining = response_inactivity_timeout - (
                         time.monotonic() - last_response_activity
                     )
@@ -1251,6 +1326,7 @@ class LiveModelSTT(SpeechToTextEntity):
                         pass
                 else:
                     while not receive_task.done():
+                        keep_alive_while_tools_run()
                         remaining = response_inactivity_timeout - (
                             time.monotonic() - last_response_activity
                         )
@@ -1286,6 +1362,7 @@ class LiveModelSTT(SpeechToTextEntity):
             finally:
                 tasks: list[asyncio.Task[Any]] = [send_task, receive_task]
                 tasks.append(publish_task)
+                tasks.extend(tool_tasks)
                 for task in tasks:
                     if not task.done():
                         task.cancel()
@@ -1293,6 +1370,10 @@ class LiveModelSTT(SpeechToTextEntity):
                     *tasks,
                     return_exceptions=True,
                 )
+                if unanswered_call_ids:
+                    # The model still waits for these responses; a reused
+                    # session would carry that into the next turn.
+                    session_manager.retire_session(conversation_id)
                 response_audio_stream.finish()
                 if response_text_stream is not None:
                     response_text_stream.finish()

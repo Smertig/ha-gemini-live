@@ -16,6 +16,7 @@ from gemini_live.const import (
     CONF_SUPPORT_BARGE_IN,
     CONF_ENABLE_SOUND_RESPONSES,
     CONF_RESPONSE_TIMEOUT,
+    CONF_TOOL_TIMEOUT,
     CONF_TRANSCRIBE_GEMINI,
     CONF_TRANSCRIBE_GPT,
     DOMAIN,
@@ -918,3 +919,145 @@ async def test_placeholder_transcript_carries_unique_turn_id(
     assert turn is not None
     assert turn.assistant_text.startswith(GEMINI_LIVE_TTS_PLACEHOLDER)
     assert turn.assistant_text != GEMINI_LIVE_TTS_PLACEHOLDER
+
+
+class ToolCallingSession(ScriptedSession):
+    """Says something, calls a slow tool, keeps streaming, then answers."""
+
+    def __init__(self) -> None:
+        super().__init__(support_barge_in=False)
+        self.tool_responses: list = []
+        self.streamed_during_tool = asyncio.Event()
+        self._responses_received = asyncio.Event()
+
+    async def send_tool_responses(self, responses) -> None:
+        self.tool_responses.extend(responses)
+        self._responses_received.set()
+
+    async def receive(self):
+        self.reply_started.set()
+        yield LiveEvent(
+            audio=AUDIO_A,
+            tool_calls=[LiveToolCall("slow_lookup", "call-1", {"q": "x"})],
+        )
+        # A turn_complete before the tool response does not end the answer.
+        yield LiveEvent(turn_complete=True)
+        yield LiveEvent(output_transcript="still streaming")
+        self.streamed_during_tool.set()
+        await self._responses_received.wait()
+        yield LiveEvent(audio=AUDIO_B)
+        yield LiveEvent(turn_complete=True)
+
+
+class GatedLlmApi:
+    """An LLM API instance whose only tool waits until released."""
+
+    api_prompt = "api prompt"
+    custom_serializer = None
+    tools = [
+        SimpleNamespace(
+            name="slow_lookup",
+            description="Slow.",
+            parameters=SimpleNamespace(schema={}),
+        )
+    ]
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+
+    async def async_call_tool(self, tool_input) -> dict[str, Any]:
+        await self.release.wait()
+        return {"result": f"{tool_input.tool_args['q']} done"}
+
+
+def _start_tool_turn(entity, session, monkeypatch, llm_api) -> asyncio.Task:
+    async def fake_async_get_api(**_kwargs):
+        return llm_api
+
+    monkeypatch.setattr("gemini_live.stt.llm.async_get_api", fake_async_get_api)
+    _bind_client(entity, ScriptedClient(session))
+    mic = MicStream()
+    run_task = asyncio.create_task(
+        entity._async_run_audio_stream_sdk(
+            _metadata(),
+            mic.chunks(),
+            "k",
+            "m",
+            "v",
+            "",
+            True,
+            False,
+            False,
+            asyncio.Future(),
+            "conversation-1",
+            None,
+        )
+    )
+    mic.put(MIC_CHUNK)
+    mic.close()
+    return run_task
+
+
+async def _played_audio(turn_store: TurnStore, result: SpeechResult) -> bytes:
+    turn = turn_store.take_voice_turn("conversation-1", result.text)
+    assert turn is not None
+    return b"".join([chunk async for chunk in turn.audio.async_chunks()])
+
+
+@pytest.mark.parametrize("entity_class", ENTITY_CLASSES)
+async def test_slow_tool_runs_beside_the_receive_loop(
+    entity_class, monkeypatch
+) -> None:
+    response_timeout = 0.3
+    entity, _session_manager, turn_store = _make_entity(
+        FakeHass(),
+        {
+            "api_key": "k",
+            CONF_SUPPORT_BARGE_IN: False,
+            CONF_RESPONSE_TIMEOUT: response_timeout,
+        },
+        entity_class,
+    )
+    llm_api = GatedLlmApi()
+    session = ToolCallingSession()
+    run_task = _start_tool_turn(entity, session, monkeypatch, llm_api)
+
+    await asyncio.wait_for(session.streamed_during_tool.wait(), 5)
+    assert session.tool_responses == []
+    # Outlive the inactivity timeout: a running tool keeps the turn alive.
+    await asyncio.sleep(response_timeout * 3)
+    assert not run_task.done()
+
+    llm_api.release.set()
+    result = await asyncio.wait_for(run_task, 5)
+
+    assert result.result is SpeechResultState.SUCCESS
+    assert [(r.name, r.call_id, r.response) for r in session.tool_responses] == [
+        ("slow_lookup", "call-1", {"result": "x done"})
+    ]
+    assert await _played_audio(turn_store, result) == resample_24k_to_16k(
+        AUDIO_A + AUDIO_B
+    )
+
+
+@pytest.mark.parametrize("entity_class", ENTITY_CLASSES)
+async def test_hung_tool_is_answered_with_an_error_after_the_tool_timeout(
+    entity_class, monkeypatch
+) -> None:
+    entity, _session_manager, turn_store = _make_entity(
+        FakeHass(),
+        {"api_key": "k", CONF_SUPPORT_BARGE_IN: False, CONF_TOOL_TIMEOUT: 0.2},
+        entity_class,
+    )
+    session = ToolCallingSession()
+    run_task = _start_tool_turn(entity, session, monkeypatch, GatedLlmApi())
+
+    result = await asyncio.wait_for(run_task, 5)
+
+    assert result.result is SpeechResultState.SUCCESS
+    [response] = session.tool_responses
+    assert response.call_id == "call-1"
+    assert response.response["error"].startswith("Tool timed out")
+    assert await _played_audio(turn_store, result) == resample_24k_to_16k(
+        AUDIO_A + AUDIO_B
+    )

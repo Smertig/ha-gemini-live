@@ -17,6 +17,8 @@ CONF_THINKING_LEVEL = "thinking_level"
 CONF_SUPPORT_BARGE_IN = "support_barge_in"
 CONF_AFFECTIVE_DIALOG = "affective_dialog"
 CONF_RESPONSE_TIMEOUT = "response_timeout"
+# Not in the options flow; an integration hosting the entities may set it.
+CONF_TOOL_TIMEOUT = "tool_timeout"
 
 DEFAULT_MODEL = "gemini-3.1-flash-live-preview"
 DEFAULT_VOICE = "Puck"
@@ -31,6 +33,7 @@ DEFAULT_AFFECTIVE_DIALOG = False
 DEFAULT_RESPONSE_TIMEOUT = 30
 MIN_RESPONSE_TIMEOUT = 15
 MAX_RESPONSE_TIMEOUT = 120
+DEFAULT_TOOL_TIMEOUT = 90
 PROVIDER_GEMINI = "gemini"
 PROVIDER_OPENAI = "openai"
 PROVIDER_PERSONAPLEX = "personaplex"

@@ -10,7 +10,7 @@ from gemini_live.gemini import (
     _gemini_config,
     async_create_gemini_client,
 )
-from gemini_live.live import LiveConfig, LiveEvent, LiveTool
+from gemini_live.live import LiveConfig, LiveEvent, LiveTool, LiveToolResponse
 
 
 def _make_config(**overrides) -> LiveConfig:
@@ -400,6 +400,41 @@ async def test_gemini_legacy_does_not_reenter_sdk_receive():
 
     assert events == [LiveEvent(interrupted=True, turn_complete=True)]
     assert sdk_session.receive_count == 1
+
+
+async def test_gemini_legacy_reenters_sdk_receive_until_tool_calls_are_answered():
+    class ToolTurnsSDKSession(_TurnBoundedFakeSDKSession):
+        async def send_tool_response(self, function_responses):
+            self.function_responses = function_responses
+
+    tool_call = SimpleNamespace(
+        function_calls=[SimpleNamespace(name="lookup", id="call-1", args={})]
+    )
+    sdk_session = ToolTurnsSDKSession(
+        [
+            [
+                SimpleNamespace(
+                    **{**vars(_sdk_response()), "tool_call": tool_call}
+                ),
+                _sdk_response(_server_content(turn_complete=True)),
+            ],
+            [_sdk_response(_server_content(turn_complete=True))],
+            [_sdk_response(_server_content(turn_complete=True))],
+        ]
+    )
+    session = GeminiLiveSession(sdk_session, support_barge_in=False)
+
+    events = []
+    async for event in session.receive():
+        events.append(event)
+        # A slow tool answers only after the server closed its turn.
+        if event.turn_complete and len(events) == 2:
+            await session.send_tool_responses(
+                [LiveToolResponse("lookup", "call-1", {"result": "ok"})]
+            )
+
+    assert [event.turn_complete for event in events] == [False, True, True]
+    assert sdk_session.receive_count == 2
 
 
 async def test_barge_in_receives_next_utterance_after_normal_turn_completion():
